@@ -13,7 +13,7 @@ from vertexai.generative_models import GenerativeModel
 from vertexai.preview.vision_models import ImageGenerationModel
 
 # ---------------- CONFIG ----------------
-PROJECT_ID = "drl-zenai-prod"   # ⚠️ Replace with your GCP Project ID
+PROJECT_ID = "drl-zenai-prod"   # ⚠️ Your GCP Project ID
 REGION = "us-central1"
 
 vertexai.init(project=PROJECT_ID, location=REGION)
@@ -21,7 +21,7 @@ vertexai.init(project=PROJECT_ID, location=REGION)
 TEXT_MODEL_NAME = "gemini-2.5-pro"
 TEXT_MODEL = GenerativeModel(TEXT_MODEL_NAME)
 
-IMAGE_MODEL_NAME = "imagen-4.0-ultra"
+IMAGE_MODEL_NAME = "imagen-3.0-generate-001"  # ✅ use correct Imagen model
 IMAGE_MODEL = ImageGenerationModel.from_pretrained(IMAGE_MODEL_NAME)
 
 # ---------------- FASTAPI ----------------
@@ -230,25 +230,27 @@ def save_temp_image(image_bytes, idx, title):
     return filepath
 
 def generate_images_for_points(points, mode="ppt"):
-    """Generate one image per slide/section using Imagen 4 Ultra."""
+    """Generate one image per slide/section using Imagen."""
     images = []
     for idx, item in enumerate(points, start=1):
         img_prompt = (
-            f"An illustration for a {mode.upper()} slide titled '{item['title']}'. "
+            f"An illustration for a {mode.upper()} section titled '{item['title']}'. "
             f"Content: {item['description']}. "
             f"Style: professional, modern, clean, infographic look."
         )
         try:
-            resp = IMAGE_MODEL.generate_images(
-                prompt=img_prompt,
-                number_of_images=1,
-                size="1024x1024"
-            )
-            if resp and resp[0]._raw_image_bytes:
-                img_bytes = resp[0]._raw_image_bytes
+            resp = IMAGE_MODEL.generate_images(prompt=img_prompt)
+
+            if resp.images and hasattr(resp.images[0], "image_bytes"):
+                img_bytes = resp.images[0].image_bytes
+            elif resp.images and hasattr(resp.images[0], "bytes_base64_encoded"):
+                img_bytes = base64.b64decode(resp.images[0].bytes_base64_encoded)
+            else:
+                img_bytes = None
+
+            if img_bytes:
                 img_path = save_temp_image(img_bytes, idx, item["title"])
                 images.append(img_path)
-                print(f"✅ Generated image for {mode} {idx}: {img_path}")
             else:
                 images.append(None)
         except Exception as e:
@@ -369,13 +371,12 @@ def chat_with_doc(req: ChatDocRequest):
 @app.post("/generate-image")
 def generate_image(req: ImageRequest):
     try:
-        resp = IMAGE_MODEL.generate_images(
-            prompt=req.prompt,
-            number_of_images=1,
-            size="1024x1024"
-        )
-        if resp and resp[0]._raw_image_bytes:
-            img_bytes = resp[0]._raw_image_bytes
+        resp = IMAGE_MODEL.generate_images(prompt=req.prompt)
+
+        if resp.images and hasattr(resp.images[0], "image_bytes"):
+            img_bytes = resp.images[0].image_bytes
+        elif resp.images and hasattr(resp.images[0], "bytes_base64_encoded"):
+            img_bytes = base64.b64decode(resp.images[0].bytes_base64_encoded)
         else:
             raise HTTPException(status_code=500, detail="Image generation failed")
 
