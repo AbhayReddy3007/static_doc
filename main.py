@@ -12,7 +12,7 @@ import vertexai
 from vertexai.generative_models import GenerativeModel
 
 # ---------------- CONFIG ----------------
-PROJECT_ID = "drl-zenai-prod"   # ⚠️ Replace with your GCP Project ID
+PROJECT_ID = "drl-zenai-prod"   # ⚠️ Your GCP Project ID
 REGION = "us-central1"
 
 vertexai.init(project=PROJECT_ID, location=REGION)
@@ -228,13 +228,13 @@ def save_temp_image(image_bytes, idx, title):
     return filepath
 
 def generate_images_for_points(points, mode="ppt"):
-    """Generate one image per slide/section using Imagen."""
+    """Generate one image per slide/section using Imagen and save locally."""
     images = []
     img_model = GenerativeModel(IMAGE_MODEL_NAME)
 
     for idx, item in enumerate(points, start=1):
         img_prompt = (
-            f"An illustration for a {mode.upper()} section titled '{item['title']}'. "
+            f"An illustration for a {mode.upper()} titled '{item['title']}'. "
             f"Content: {item['description']}. "
             f"Style: professional, modern, clean, infographic look."
         )
@@ -243,18 +243,17 @@ def generate_images_for_points(points, mode="ppt"):
 
             img_bytes = None
             if resp.images:
-                if hasattr(resp.images[0], "_raw_image_bytes"):
+                if hasattr(resp.images[0], "_raw_image_bytes"):  # ✅ Correct field
                     img_bytes = resp.images[0]._raw_image_bytes
-                elif hasattr(resp.images[0], "image_bytes"):
-                    img_bytes = resp.images[0].image_bytes
                 elif hasattr(resp.images[0], "bytes_base64_encoded"):
                     img_bytes = base64.b64decode(resp.images[0].bytes_base64_encoded)
 
             if img_bytes:
                 img_path = save_temp_image(img_bytes, idx, item["title"])
                 images.append(img_path)
+                print(f"✅ Generated image for {mode} {idx}: {img_path}")
             else:
-                print(f"⚠️ No image generated for {mode} {idx}")
+                print(f"⚠️ No image bytes for {mode} {idx}")
                 images.append(None)
 
         except Exception as e:
@@ -383,8 +382,6 @@ def generate_image(req: ImageRequest):
         if resp.images:
             if hasattr(resp.images[0], "_raw_image_bytes"):
                 img_bytes = resp.images[0]._raw_image_bytes
-            elif hasattr(resp.images[0], "image_bytes"):
-                img_bytes = resp.images[0].image_bytes
             elif hasattr(resp.images[0], "bytes_base64_encoded"):
                 img_bytes = base64.b64decode(resp.images[0].bytes_base64_encoded)
 
