@@ -21,7 +21,7 @@ vertexai.init(project=PROJECT_ID, location=REGION)
 TEXT_MODEL_NAME = "gemini-2.5-pro"
 TEXT_MODEL = GenerativeModel(TEXT_MODEL_NAME)
 
-IMAGE_MODEL_NAME = "imagen-3.0-generate-001"  # ✅ use correct Imagen model
+IMAGE_MODEL_NAME = "imagegeneration@005"  # ✅ Correct Imagen 3 model
 IMAGE_MODEL = ImageGenerationModel.from_pretrained(IMAGE_MODEL_NAME)
 
 # ---------------- FASTAPI ----------------
@@ -239,12 +239,10 @@ def generate_images_for_points(points, mode="ppt"):
             f"Style: professional, modern, clean, infographic look."
         )
         try:
-            resp = IMAGE_MODEL.generate_images(prompt=img_prompt)
+            resp = IMAGE_MODEL.generate_images(prompt=img_prompt, number_of_images=1)
 
-            if resp.images and hasattr(resp.images[0], "image_bytes"):
-                img_bytes = resp.images[0].image_bytes
-            elif resp.images and hasattr(resp.images[0], "bytes_base64_encoded"):
-                img_bytes = base64.b64decode(resp.images[0].bytes_base64_encoded)
+            if resp.images and hasattr(resp.images[0], "_image_bytes"):
+                img_bytes = resp.images[0]._image_bytes
             else:
                 img_bytes = None
 
@@ -371,12 +369,10 @@ def chat_with_doc(req: ChatDocRequest):
 @app.post("/generate-image")
 def generate_image(req: ImageRequest):
     try:
-        resp = IMAGE_MODEL.generate_images(prompt=req.prompt)
+        resp = IMAGE_MODEL.generate_images(prompt=req.prompt, number_of_images=1)
 
-        if resp.images and hasattr(resp.images[0], "image_bytes"):
-            img_bytes = resp.images[0].image_bytes
-        elif resp.images and hasattr(resp.images[0], "bytes_base64_encoded"):
-            img_bytes = base64.b64decode(resp.images[0].bytes_base64_encoded)
+        if resp.images and hasattr(resp.images[0], "_image_bytes"):
+            img_bytes = resp.images[0]._image_bytes
         else:
             raise HTTPException(status_code=500, detail="Image generation failed")
 
