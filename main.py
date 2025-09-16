@@ -1,70 +1,153 @@
-# main.py
-import os
-import tempfile
-from typing import List
-
-import fitz  # PyMuPDF
-import docx
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from mistralai import Mistral
+from pydantic import BaseModel
+from typing import List, Optional
+import os, re, datetime, tempfile, fitz, docx, base64
 
-# --------------------
-# Config
-# --------------------
-# Read your key from env. Example (PowerShell):
-#   $env:MISTRAL_API_KEY="your_real_key"
-MISTRAL_API_KEY = "MEo5qeq34xziFnYgqpKhxtIW50tbCzQa"
+from ppt_generator import create_ppt
+from doc_generator import create_doc
 
-SUMMARY_INSTRUCTION = (
-    "Provide a comprehensive and detailed summary of the given content. "
-    "Ensure that no important point, topic, or detail is omitted. "
-    "Cover every aspect thoroughly, maintaining accuracy and completeness. "
-    "The summary should be as extensive as possible, preserving the depth "
-    "and context of the original material rather than condensing it too much."
-)
+import vertexai
+from vertexai.generative_models import GenerativeModel
 
-# Conservative character limits to keep requests reliable
-CHUNK_CHARS = 8000
-CHUNK_OVERLAP = 300
-MODEL_NAME = "mistral-small-latest"
+# ---------------- CONFIG ----------------
+PROJECT_ID = "drl-zenai-prod"   # ⚠️ Fill with your GCP Project ID
+REGION = "us-central1"
 
-# --------------------
-# FastAPI app
-# --------------------
+vertexai.init(project=PROJECT_ID, location=REGION)
+
+TEXT_MODEL_NAME = "gemini-2.5-pro"
+TEXT_MODEL = GenerativeModel(TEXT_MODEL_NAME)
+
+IMAGE_MODEL_NAME = "imagen-4.0-ultra-generate-001"
+
+# ---------------- FASTAPI ----------------
 app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ---------------- MODELS ----------------
+class ChatRequest(BaseModel):
+    message: str
 
-# --------------------
-# Utils: extraction
-# --------------------
+class ChatDocRequest(BaseModel):
+    message: str
+    document_text: str
+
+class Slide(BaseModel):
+    title: str
+    description: str
+
+class Section(BaseModel):
+    title: str
+    description: str
+
+class Outline(BaseModel):
+    title: str
+    slides: List[Slide]
+
+class DocOutline(BaseModel):
+    title: str
+    sections: List[Section]
+
+class EditRequest(BaseModel):
+    outline: Outline
+    feedback: str
+
+class EditDocRequest(BaseModel):
+    outline: DocOutline
+    feedback: str
+
+class GeneratePPTRequest(BaseModel):
+    description: str = ""
+    outline: Optional[Outline] = None
+
+class GenerateDocRequest(BaseModel):
+    description: str = ""
+    outline: Optional[DocOutline] = None
+
+class ImageRequest(BaseModel):
+    prompt: str
+
+
+# ---------------- HELPERS ----------------
+def extract_slide_count(description: str, default: int = 5) -> int:
+    m = re.search(r"(\d+)\s*(slides?|sections?|pages?)", description, re.IGNORECASE)
+    if m:
+        total = int(m.group(1))
+        return max(1, total - 1)
+    return default - 1
+
+def call_vertex(prompt: str) -> str:
+    try:
+        response = TEXT_MODEL.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Vertex AI text generation error: {e}")
+
+def generate_title(summary: str) -> str:
+    prompt = f"""Read the following summary and create a short, clear, presentation-style title.
+- Keep it under 12 words
+- Do not include birth dates, long sentences, or excessive details
+- Just give a clean title, like a presentation heading
+
+Summary:
+{summary}
+"""
+    return call_vertex(prompt).strip()
+
+def parse_points(points_text: str):
+    points = []
+    current_title, current_content = None, []
+    lines = [re.sub(r"[#*>`]", "", ln).rstrip() for ln in points_text.splitlines()]
+
+    for line in lines:
+        if not line or "Would you like" in line:
+            continue
+        m = re.match(r"^\s*(Slide|Section)\s*(\d+)\s*:\s*(.+)$", line, re.IGNORECASE)
+        if m:
+            if current_title:
+                points.append({"title": current_title, "description": "\n".join(current_content)})
+            current_title, current_content = m.group(3).strip(), []
+            continue
+        if line.strip().startswith("-"):
+            text = line.lstrip("-").strip()
+            if text:
+                current_content.append(f"• {text}")
+        elif line.strip().startswith(("•", "*")) or line.startswith("  "):
+            text = line.lstrip("•*").strip()
+            if text:
+                current_content.append(f"- {text}")
+        else:
+            if line.strip():
+                current_content.append(line.strip())
+
+    if current_title:
+        points.append({"title": current_title, "description": "\n".join(current_content)})
+    return points
+
 def extract_text(path: str, filename: str) -> str:
     name = filename.lower()
-
     if name.endswith(".pdf"):
         text_parts: List[str] = []
         doc = fitz.open(path)
         try:
             for page in doc:
-                # "text" ensures plain text extraction
                 text_parts.append(page.get_text("text"))
         finally:
             doc.close()
         return "\n".join(text_parts)
-
     if name.endswith(".docx"):
         d = docx.Document(path)
         return "\n".join(p.text for p in d.paragraphs)
-
     if name.endswith(".txt"):
-        # Try common encodings, then ignore errors as last resort
         for enc in ("utf-8", "utf-16", "utf-16-le", "utf-16-be", "latin-1"):
             try:
                 with open(path, "r", encoding=enc) as f:
@@ -73,12 +156,9 @@ def extract_text(path: str, filename: str) -> str:
                 continue
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read()
-
     return ""
 
-
-def split_text(text: str, chunk_size: int = CHUNK_CHARS, overlap: int = CHUNK_OVERLAP) -> List[str]:
-    """Simple character-based chunking with overlap to avoid boundary loss."""
+def split_text(text: str, chunk_size: int = 8000, overlap: int = 300) -> List[str]:
     if not text:
         return []
     chunks: List[str] = []
@@ -92,108 +172,226 @@ def split_text(text: str, chunk_size: int = CHUNK_CHARS, overlap: int = CHUNK_OV
         start = max(0, end - overlap)
     return chunks
 
-
-# --------------------
-# Utils: Mistral calls
-# --------------------
-def get_mistral_client() -> Mistral:
-    if not MISTRAL_API_KEY:
-        raise HTTPException(status_code=500, detail="Mistral API key not set (MISTRAL_API_KEY).")
-    return Mistral(api_key=MISTRAL_API_KEY)
-
-
-def call_mistral(text: str, system_instruction: str) -> str:
-    """Single chat completion call."""
-    client = get_mistral_client()
-    resp = client.chat.complete(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": text},
-        ],
-    )
-    return resp.choices[0].message.content
-
+def generate_outline_from_desc(description: str, num_items: int, mode: str = "ppt"):
+    if mode == "ppt":
+        prompt = f"""Create a PowerPoint outline on: {description}.
+Generate exactly {num_items} content slides (⚠️ excluding the title slide).
+Do NOT include a title slide — I will handle it separately.
+Start from Slide 1 as the first *content slide*.
+Format strictly like this:
+Slide 1: <Title>
+- Bullet
+- Bullet
+- Bullet
+"""
+    else:
+        prompt = f"""Create a detailed Document outline on: {description}.
+Generate exactly {num_items} sections (treat each section as roughly one page).
+Each section should have:
+- A section title
+- 2–3 descriptive paragraphs (5–7 sentences each) of full prose, not bullets.
+Do NOT use bullet points.
+Format strictly like this:
+Section 1: <Title>
+<Paragraph 1>
+<Paragraph 2>
+<Paragraph 3>
+"""
+    points_text = call_vertex(prompt)
+    return parse_points(points_text)
 
 def summarize_long_text(full_text: str) -> str:
-    """
-    Map-reduce style summarization without LangChain:
-      1) Summarize each chunk exhaustively (map)
-      2) Merge all chunk summaries into one comprehensive summary (reduce)
-    """
-    # 1) Map
     chunks = split_text(full_text)
     if len(chunks) <= 1:
-        return call_mistral(full_text, SUMMARY_INSTRUCTION)
-
-    per_chunk_instruction = (
-        "You are given a chunk from a longer document.\n"
-        "Write a meticulous, exhaustive summary of this chunk. Retain all important "
-        "points, facts, numbers, definitions, lists, examples, equations, and names. "
-        "Avoid generalities; do not omit details."
-    )
-    partial_summaries: List[str] = []
-    for idx, ch in enumerate(chunks, 1):
-        mapped = call_mistral(ch, per_chunk_instruction)
-        partial_summaries.append(f"Chunk {idx} Summary:\n{mapped}")
-
-    # 2) Reduce (single pass). If your docs are huge, you can add a second-level reduce here.
+        return call_vertex(f"Summarize the following text in detail:\n\n{full_text}")
+    partial_summaries = []
+    for idx, ch in enumerate(chunks, start=1):
+        mapped = call_vertex(f"Summarize this part of a longer document:\n\n{ch}")
+        partial_summaries.append(f"Chunk {idx}:\n{mapped.strip()}")
     combined = "\n\n".join(partial_summaries)
+    return call_vertex(f"Combine these summaries into one clean, well-structured summary:\n\n{combined}")
 
-    reduce_instruction = (
-        SUMMARY_INSTRUCTION
-        + "\n\nYou are given multiple detailed chunk summaries of the same document. "
-          "Merge them into a single unified summary that:\n"
-          "- Preserves every important detail from the chunk summaries\n"
-          "- Resolves overlaps and contradictions carefully\n"
-          "- Organizes content logically with clear sections and bullet points where helpful\n"
-          "- Maintains accuracy, specificity, and completeness throughout"
-    )
-    return call_mistral(combined, reduce_instruction)
+def sanitize_filename(name: str) -> str:
+    return re.sub(r'[^A-Za-z0-9_.-]', '_', name)
+
+def clean_title(title: str) -> str:
+    return re.sub(r"\s*\(.*?\)", "", title).strip()
+
+def save_temp_image(image_bytes, idx, title):
+    output_dir = os.path.join(os.path.dirname(__file__), "generated_files", "images")
+    os.makedirs(output_dir, exist_ok=True)
+    safe_title = re.sub(r'[^A-Za-z0-9_.-]', '_', title)[:30]
+    filename = f"{safe_title}_{idx}.png"
+    filepath = os.path.join(output_dir, filename)
+    with open(filepath, "wb") as f:
+        f.write(image_bytes)
+    return filepath
+
+def generate_images_for_points(points, mode="ppt"):
+    """Generate one image per slide/section using Imagen."""
+    images = []
+    for idx, item in enumerate(points, start=1):
+        img_prompt = (
+            f"An illustration for a {mode.upper()} section titled '{item['title']}'. "
+            f"Content: {item['description']}. "
+            f"Style: professional, modern, clean, infographic look."
+        )
+        try:
+            img_model = GenerativeModel(IMAGE_MODEL_NAME)
+            resp = img_model.generate_images(prompt=img_prompt)
+
+            if resp.images and hasattr(resp.images[0], "image_bytes"):
+                img_bytes = resp.images[0].image_bytes
+            elif resp.images and hasattr(resp.images[0], "bytes_base64_encoded"):
+                img_bytes = base64.b64decode(resp.images[0].bytes_base64_encoded)
+            else:
+                img_bytes = None
+
+            if img_bytes:
+                img_path = save_temp_image(img_bytes, idx, item["title"])
+                images.append(img_path)
+            else:
+                images.append(None)
+        except Exception as e:
+            print(f"⚠️ Image generation failed for {mode} {idx}: {e}")
+            images.append(None)
+    return images
 
 
-# --------------------
-# Routes
-# --------------------
-@app.get("/health")
-def health():
-    return {"status": "ok", "model": MODEL_NAME}
+# ---------------- ROUTES ----------------
+@app.post("/chat")
+def chat(req: ChatRequest):
+    reply = call_vertex(req.message)
+    return {"response": reply}
 
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...)):
-    """
-    Upload a document, extract text, and immediately return a comprehensive summary.
-    (Matches your Streamlit flow that calls /upload and expects 'summary' in the response.)
-    """
-    # Save to a temp file to let extractors (PDF/DOCX) work reliably
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
-
     try:
         text = extract_text(tmp_path, file.filename)
     finally:
-        # Clean up the temp file
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-
+        try: os.remove(tmp_path)
+        except Exception: pass
     if not text or not text.strip():
         raise HTTPException(status_code=400, detail="Unsupported, empty, or unreadable file content.")
-
     try:
         summary = summarize_long_text(text)
-    except HTTPException:
-        # Re-raise known HTTP errors (e.g., missing API key)
-        raise
+        title = generate_title(summary) or os.path.splitext(file.filename)[0]
+        return {
+            "filename": file.filename,
+            "chars": len(text),
+            "chunks": len(split_text(text)),
+            "title": title,
+            "summary": summary,
+        }
     except Exception as e:
-        # Convert SDK or other runtime issues to a clean 502
         raise HTTPException(status_code=502, detail=f"Summarization failed: {e}")
 
-    return {
-        "filename": file.filename,
-        "chars": len(text),
-        "chunks": len(split_text(text)),
-        "summary": summary,
-    }
+@app.post("/generate-ppt-outline")
+def generate_ppt_outline(request: GeneratePPTRequest):
+    title = generate_title(request.description)
+    num_content_slides = extract_slide_count(request.description, default=5)
+    points = generate_outline_from_desc(request.description, num_content_slides, mode="ppt")
+    return {"title": title, "slides": points}
+
+@app.post("/generate-ppt")
+def generate_ppt(req: GeneratePPTRequest):
+    if req.outline:
+        title = clean_title(req.outline.title) or "Presentation"
+        points = [{"title": clean_title(s.title), "description": s.description} for s in req.outline.slides]
+    else:
+        title = clean_title(generate_title(req.description))
+        num_content_slides = extract_slide_count(req.description, default=5)
+        points = generate_outline_from_desc(req.description, num_content_slides, mode="ppt")
+
+    images = generate_images_for_points(points, mode="ppt")
+
+    output_dir = os.path.join(os.path.dirname(__file__), "generated_files")
+    os.makedirs(output_dir, exist_ok=True)
+    filename = os.path.join(output_dir, f"{sanitize_filename(title)}.pptx")
+
+    create_ppt(title, points, filename=filename, images=images)
+
+    return FileResponse(filename,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        filename=os.path.basename(filename)
+    )
+
+@app.post("/generate-doc-outline")
+def generate_doc_outline(request: GenerateDocRequest):
+    title = generate_title(request.description)
+    num_sections = extract_slide_count(request.description, default=5)
+    points = generate_outline_from_desc(request.description, num_sections, mode="doc")
+    return {"title": title, "sections": points}
+
+@app.post("/generate-doc")
+def generate_doc(req: GenerateDocRequest):
+    if req.outline:
+        title = clean_title(req.outline.title) or "Document"
+        points = [{"title": clean_title(s.title), "description": s.description} for s in req.outline.sections]
+    else:
+        title = clean_title(generate_title(req.description))
+        num_sections = extract_slide_count(req.description, default=5)
+        points = generate_outline_from_desc(req.description, num_sections, mode="doc")
+
+    images = generate_images_for_points(points, mode="doc")
+
+    output_dir = os.path.join(os.path.dirname(__file__), "generated_files")
+    os.makedirs(output_dir, exist_ok=True)
+    filename = os.path.join(output_dir, f"{sanitize_filename(title)}.docx")
+
+    create_doc(title, points, filename=filename, images=images)
+
+    return FileResponse(filename,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=os.path.basename(filename)
+    )
+
+@app.post("/chat-doc")
+def chat_with_doc(req: ChatDocRequest):
+    prompt = f"""
+    You are an assistant answering based only on the provided document.
+    Document:
+    {req.document_text}
+
+    Question:
+    {req.message}
+
+    Answer clearly and concisely using only the document content.
+    """
+    try:
+        reply = call_vertex(prompt)
+        return {"response": reply}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chat-with-doc failed: {e}")
+
+@app.post("/generate-image")
+def generate_image(req: ImageRequest):
+    try:
+        img_model = GenerativeModel(IMAGE_MODEL_NAME)
+        resp = img_model.generate_images(prompt=req.prompt)
+
+        if resp.images and hasattr(resp.images[0], "image_bytes"):
+            img_bytes = resp.images[0].image_bytes
+        elif resp.images and hasattr(resp.images[0], "bytes_base64_encoded"):
+            img_bytes = base64.b64decode(resp.images[0].bytes_base64_encoded)
+        else:
+            raise HTTPException(status_code=500, detail="Image generation failed")
+
+        output_dir = os.path.join(os.path.dirname(__file__), "generated_files", "images")
+        os.makedirs(output_dir, exist_ok=True)
+        filename = os.path.join(output_dir, f"generated_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+
+        with open(filename, "wb") as f:
+            f.write(img_bytes)
+
+        return FileResponse(filename, media_type="image/png", filename=os.path.basename(filename))
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image generation error: {e}")
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "text_model": TEXT_MODEL_NAME, "image_model": IMAGE_MODEL_NAME}
