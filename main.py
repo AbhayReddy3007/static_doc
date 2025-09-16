@@ -12,7 +12,7 @@ import vertexai
 from vertexai.generative_models import GenerativeModel
 
 # ---------------- CONFIG ----------------
-PROJECT_ID = "drl-zenai-prod"   # ⚠️ Fill with your GCP Project ID
+PROJECT_ID = "drl-zenai-prod"   # ⚠️ Replace with your GCP Project ID
 REGION = "us-central1"
 
 vertexai.init(project=PROJECT_ID, location=REGION)
@@ -230,6 +230,8 @@ def save_temp_image(image_bytes, idx, title):
 def generate_images_for_points(points, mode="ppt"):
     """Generate one image per slide/section using Imagen."""
     images = []
+    img_model = GenerativeModel(IMAGE_MODEL_NAME)
+
     for idx, item in enumerate(points, start=1):
         img_prompt = (
             f"An illustration for a {mode.upper()} section titled '{item['title']}'. "
@@ -237,24 +239,28 @@ def generate_images_for_points(points, mode="ppt"):
             f"Style: professional, modern, clean, infographic look."
         )
         try:
-            img_model = GenerativeModel(IMAGE_MODEL_NAME)
             resp = img_model.generate_images(prompt=img_prompt)
 
-            if resp.images and hasattr(resp.images[0], "image_bytes"):
-                img_bytes = resp.images[0].image_bytes
-            elif resp.images and hasattr(resp.images[0], "bytes_base64_encoded"):
-                img_bytes = base64.b64decode(resp.images[0].bytes_base64_encoded)
-            else:
-                img_bytes = None
+            img_bytes = None
+            if resp.images:
+                if hasattr(resp.images[0], "_raw_image_bytes"):
+                    img_bytes = resp.images[0]._raw_image_bytes
+                elif hasattr(resp.images[0], "image_bytes"):
+                    img_bytes = resp.images[0].image_bytes
+                elif hasattr(resp.images[0], "bytes_base64_encoded"):
+                    img_bytes = base64.b64decode(resp.images[0].bytes_base64_encoded)
 
             if img_bytes:
                 img_path = save_temp_image(img_bytes, idx, item["title"])
                 images.append(img_path)
             else:
+                print(f"⚠️ No image generated for {mode} {idx}")
                 images.append(None)
+
         except Exception as e:
             print(f"⚠️ Image generation failed for {mode} {idx}: {e}")
             images.append(None)
+
     return images
 
 
@@ -373,11 +379,16 @@ def generate_image(req: ImageRequest):
         img_model = GenerativeModel(IMAGE_MODEL_NAME)
         resp = img_model.generate_images(prompt=req.prompt)
 
-        if resp.images and hasattr(resp.images[0], "image_bytes"):
-            img_bytes = resp.images[0].image_bytes
-        elif resp.images and hasattr(resp.images[0], "bytes_base64_encoded"):
-            img_bytes = base64.b64decode(resp.images[0].bytes_base64_encoded)
-        else:
+        img_bytes = None
+        if resp.images:
+            if hasattr(resp.images[0], "_raw_image_bytes"):
+                img_bytes = resp.images[0]._raw_image_bytes
+            elif hasattr(resp.images[0], "image_bytes"):
+                img_bytes = resp.images[0].image_bytes
+            elif hasattr(resp.images[0], "bytes_base64_encoded"):
+                img_bytes = base64.b64decode(resp.images[0].bytes_base64_encoded)
+
+        if not img_bytes:
             raise HTTPException(status_code=500, detail="Image generation failed")
 
         output_dir = os.path.join(os.path.dirname(__file__), "generated_files", "images")
