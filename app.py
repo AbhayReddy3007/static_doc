@@ -1,4 +1,4 @@
-# app.py (Streamlit + Vertex AI, ready for Streamlit Cloud)
+# app.py (Streamlit + Vertex AI, with proper secrets handling for Streamlit Cloud)
 import os
 import datetime
 import json
@@ -13,8 +13,9 @@ REGION = "us-central1"
 
 # Load Google Cloud credentials from Streamlit secrets
 creds_path = "/tmp/service_account.json"
+service_account_info = json.loads(st.secrets["gcp_service_account"])
 with open(creds_path, "w") as f:
-    f.write(st.secrets["service_account.json"])
+    json.dump(service_account_info, f)
 
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
 
