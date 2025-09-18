@@ -1,0 +1,7 @@
+streamlit
+google-generativeai
+requests
+python-pptx
+python-docx
+pillow
+PyMuPDF
