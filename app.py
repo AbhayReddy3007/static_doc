@@ -1,107 +1,89 @@
-# app.py
+# app.py (Streamlit + Vertex AI, ready for Streamlit Cloud)
+import os
+import datetime
+import json
 import streamlit as st
-import requests
-import base64
 
-# ✅ Page setup
-st.set_page_config(page_title="Image Generator", layout="centered")
-st.title("🖼️ Image Generator")
+import vertexai
+from vertexai.preview.vision_models import ImageGenerationModel
 
-# ✅ Hardcoded Stability API Key
-STABILITY_API_KEY = "sk-ccceUzPNm0Q4StkwZIu8dvWyXc84N2sw5olVBMG7PPfCtpgP"
-DEFAULT_MODEL = "stable-diffusion-xl-1024-v1-0"
-BASE_URL_TEMPLATE = "https://api.stability.ai/v1/generation/{model}/text-to-image"
+# ---------------- CONFIG ----------------
+PROJECT_ID = "drl-zenai-prod"
+REGION = "us-central1"
 
-# ✅ Prompt input
-prompt = st.text_area(
-    "Enter your prompt",
-    value=""
-)
+# Load Google Cloud credentials from Streamlit secrets
+creds_path = "/tmp/service_account.json"
+with open(creds_path, "w") as f:
+    f.write(st.secrets["service_account.json"])
 
-# ✅ Fixed generation settings
-GEN_SETTINGS = {
-    "width": 1024,
-    "height": 1024,
-    "steps": 49,
-    "samples": 1,
-    "cfg_scale": 9,
-}
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
 
-def generate_image(prompt: str):
-    """Send request to Stability API and return images."""
-    url = BASE_URL_TEMPLATE.format(model=DEFAULT_MODEL)
-    headers = {
-        "Authorization": f"Bearer {STABILITY_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "text_prompts": [{"text": prompt}],
-        "cfg_scale": GEN_SETTINGS["cfg_scale"],
-        "height": GEN_SETTINGS["height"],
-        "width": GEN_SETTINGS["width"],
-        "sampler": "DDIM",
-        "steps": GEN_SETTINGS["steps"],
-        "samples": GEN_SETTINGS["samples"],
-    }
+# Init Vertex AI
+vertexai.init(project=PROJECT_ID, location=REGION)
 
-    resp = requests.post(url, headers=headers, json=payload, timeout=120)
+IMAGE_MODEL_NAME = "imagen-4.0-generate-001"
+IMAGE_MODEL = ImageGenerationModel.from_pretrained(IMAGE_MODEL_NAME)
 
-    if resp.status_code != 200:
-        try:
-            err = resp.json()
-        except Exception:
-            err = resp.text
-        st.error(f"Stability API error ({resp.status_code}): {err}")
-        return []
+# ---------------- STREAMLIT UI ----------------
+st.set_page_config(page_title="AI Image Generator", layout="wide")
+st.title("🖼️ AI Image Generator")
 
-    try:
-        data = resp.json()
-    except Exception as e:
-        st.error(f"Invalid JSON from Stability: {e}")
-        return []
+# ---------------- STATE ----------------
+if "generated_images" not in st.session_state:
+    st.session_state.generated_images = []
 
-    artifacts = []
-    if isinstance(data, dict) and "artifacts" in data:
-        for art in data["artifacts"]:
-            b64 = art.get("base64") or art.get("b64") or art.get("data")
-            mime = art.get("mime", "image/png")
-            if not b64:
-                continue
-            if isinstance(b64, str) and b64.startswith("data:"):
-                b64 = b64.split(",", 1)[1]
-            artifacts.append({"b64": b64, "mime": mime})
-    return artifacts
+# ---------------- UI ----------------
+prompt = st.text_area("✨ Enter your prompt to generate an image:", height=120)
 
-# ✅ Generate button
-if st.button("Generate"):
+if st.button("🚀 Generate Image"):
     if not prompt.strip():
-        st.error("Please provide a prompt.")
+        st.warning("Please enter a prompt!")
     else:
         with st.spinner("Generating image..."):
-            images = generate_image(prompt)
+            try:
+                resp = IMAGE_MODEL.generate_images(prompt=prompt, number_of_images=1)
 
-        if not images:
-            st.error("No images returned.")
-        else:
-            st.success(f"Received {len(images)} image(s) from model {DEFAULT_MODEL}")
-            for idx, art in enumerate(images):
-                b64 = art.get("b64")
-                mime = art.get("mime", "image/png")
-                if not b64:
-                    continue
-                try:
-                    img_bytes = base64.b64decode(b64)
-                except Exception as e:
-                    st.error(f"Failed to decode image {idx}: {e}")
-                    continue
+                if resp.images and hasattr(resp.images[0], "_image_bytes"):
+                    img_bytes = resp.images[0]._image_bytes
+                else:
+                    st.error("❌ No image data returned from Imagen 4")
+                    st.stop()
 
-                st.image(img_bytes, caption=f"Image {idx+1}", use_column_width=True)
+                # Save file locally (optional on Streamlit Cloud)
+                output_dir = os.path.join(os.path.dirname(__file__), "generated_images")
+                os.makedirs(output_dir, exist_ok=True)
+                filename = f"image_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                filepath = os.path.join(output_dir, filename)
+
+                with open(filepath, "wb") as f:
+                    f.write(img_bytes)
+
+                # Show image
+                st.image(img_bytes, caption=filename, use_container_width=True)
+
+                # Download button
                 st.download_button(
-                    label=f"Download image {idx+1}",
+                    "⬇️ Download Image",
                     data=img_bytes,
-                    file_name=f"gen_image_{idx+1}.png",
-                    mime=mime,
+                    file_name=filename,
+                    mime="image/png"
                 )
 
+                # Store in session history
+                st.session_state.generated_images.append({"filename": filename, "content": img_bytes})
 
+            except Exception as e:
+                st.error(f"⚠️ Image generation error: {e}")
 
+# ---------------- HISTORY ----------------
+if st.session_state.generated_images:
+    st.subheader("📂 Past Generated Images")
+    for i, img in enumerate(st.session_state.generated_images):
+        with st.expander(f"Image {i+1}: {img['filename']}"):
+            st.image(img["content"], caption=img["filename"], use_container_width=True)
+            st.download_button(
+                "⬇️ Download Again",
+                data=img["content"],
+                file_name=img["filename"],
+                mime="image/png",
+                key=f"download_img_{i}")
