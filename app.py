@@ -8,7 +8,7 @@ st.set_page_config(page_title="Image Generator", layout="centered")
 st.title("🖼️ Image Generator (Stability AI)")
 
 # ✅ Hardcoded Stability API Key
-STABILITY_API_KEY = "sk-Z0tLgOIfS3pQlu4SbJEw5PdYAMl8ll02Dgx7yrifCAsPD20k"
+STABILITY_API_KEY = "sk-ccceUzPNm0Q4StkwZIu8dvWyXc84N2sw5olVBMG7PPfCtpgP"
 DEFAULT_MODEL = "stable-diffusion-xl-1024-v1-0"
 BASE_URL_TEMPLATE = "https://api.stability.ai/v1/generation/{model}/text-to-image"
 
@@ -102,3 +102,4 @@ if st.button("Generate"):
                     file_name=f"gen_image_{idx+1}.png",
                     mime=mime,
                 )
+
