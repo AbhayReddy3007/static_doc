@@ -5,7 +5,7 @@ import base64
 
 # ✅ Page setup
 st.set_page_config(page_title="Image Generator", layout="centered")
-st.title("🖼️ Image Generator (Stability AI)")
+st.title("🖼️ Image Generator")
 
 # ✅ Hardcoded Stability API Key
 STABILITY_API_KEY = "sk-ccceUzPNm0Q4StkwZIu8dvWyXc84N2sw5olVBMG7PPfCtpgP"
@@ -102,5 +102,6 @@ if st.button("Generate"):
                     file_name=f"gen_image_{idx+1}.png",
                     mime=mime,
                 )
+
 
 
