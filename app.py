@@ -15,7 +15,7 @@ BASE_URL_TEMPLATE = "https://api.stability.ai/v1/generation/{model}/text-to-imag
 # ✅ Prompt input
 prompt = st.text_area(
     "Enter your prompt",
-    value="A professional portrait of a cyborg samurai, cinematic lighting, ultra-detailed"
+    value=""
 )
 
 # ✅ Fixed generation settings
@@ -102,4 +102,5 @@ if st.button("Generate"):
                     file_name=f"gen_image_{idx+1}.png",
                     mime=mime,
                 )
+
 
