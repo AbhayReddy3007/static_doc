@@ -13,7 +13,7 @@ REGION = "us-central1"
 
 # Load Google Cloud credentials from Streamlit secrets
 creds_path = "/tmp/service_account.json"
-service_account_info = json.loads(st.secrets["gcp_service_account"])
+service_account_info = dict(st.secrets["gcp_service_account"])
 with open(creds_path, "w") as f:
     json.dump(service_account_info, f)
 
@@ -88,3 +88,4 @@ if st.session_state.generated_images:
                 file_name=img["filename"],
                 mime="image/png",
                 key=f"download_img_{i}")
+
